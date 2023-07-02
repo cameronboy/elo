@@ -68,6 +68,7 @@ class EloRating(BaseRating):
 
 class Rating:
     def __init__(self, mu: float = MU, phi: float = PHI, sigma: float = SIGMA):
+        # TODO add a name
         self.mu = mu
         self.phi = phi
         self.sigma = sigma
