@@ -23,7 +23,7 @@ K_FACTOR = 32
 
 
 MU = 1500
-SIGMA = 350
+SIGMA = 0.06
 #: A constant which is used to standardize the logistic function to
 #: `1/(1+exp(-x))` from `1/(1+10^(-r/400))`
 Q = math.log(10) / 400
@@ -31,7 +31,7 @@ Q = math.log(10) / 400
 
 # Glicko related
 VOLATILITY = 0.06
-TAU = 1.0
+TAU = 0.2
 EPSILON = 0.000001
 DELTA = 0.0001
 PHI = 350
@@ -42,33 +42,8 @@ def utctime():
     return time.mktime(datetime.datetime.utcnow().timetuple())
 
 
-class BaseRating:
-    def __init__(self, initial_rating=MU):
-        self.rating = initial_rating
-
-    def update_rating(self, opponent_rating, outcome):
-        raise NotImplementedError("Subclasses must implement this method.")
-
-    def _calculate_g(self, opponent_rating):
-        return 1 / math.sqrt(1 + 3 * (opponent_rating**2) / (math.pi**2))
-
-
-class EloRating(BaseRating):
-    def __init__(self, initial_rating=MU, k_factor=K_FACTOR):
-        super().__init__(initial_rating)
-        self.k_factor = k_factor
-
-    def update_rating(self, opponent_rating, outcome):
-        expected_score = self._calculate_expected_score(opponent_rating)
-        self.rating += self.k_factor * (outcome - expected_score)
-
-    def _calculate_expected_score(self, opponent_rating):
-        return 1 / (1 + math.pow(10, (opponent_rating - self.rating) / 400))
-
-
-class Rating:
-    def __init__(self, mu: float = MU, phi: float = PHI, sigma: float = SIGMA):
-        # TODO add a name
+class Rating(object):
+    def __init__(self, mu=MU, phi=PHI, sigma=SIGMA):
         self.mu = mu
         self.phi = phi
         self.sigma = sigma
@@ -78,41 +53,68 @@ class Rating:
         args = (c.__module__, c.__name__, self.mu, self.phi, self.sigma)
         return '%s.%s(mu=%.3f, phi=%.3f, sigma=%.3f)' % args
 
-
-class Glicko2:
-    def __init__(self, mu: float = MU, phi: float = PHI, sigma: float = SIGMA, tau: float = TAU, epsilon: float = EPSILON):
-        self.mu = mu
-        self.phi = phi
-        self.sigma = sigma
-        self.tau = tau
-        self.epsilon = epsilon
-
-    def create_rating(self, mu: Optional[float] = None, phi: Optional[float] = None, sigma: Optional[float] = None) -> Rating:
+    def create_rating(self, mu=None, phi=None, sigma=None):
         if mu is None:
             mu = self.mu
         if phi is None:
             phi = self.phi
         if sigma is None:
             sigma = self.sigma
-        return Rating(mu, phi, sigma)
+        return self(mu, phi, sigma)
+    
+    def rate(self):
+        raise NotImplemented
 
-    def scale_down(self, rating: Rating, ratio: float = 173.7178) -> Rating:
+    def rate_1vs1(self):
+        raise NotImplemented
+
+
+class EloRating(object):
+    def __init__(self, k_factor=K_FACTOR):
+        self.k_factor = k_factor
+        self.type = 'Elo'
+
+    def rate(self, rating1, rating2):
+        expected_score = self._calculate_expected_score(rating1, rating2)
+        self.rating += self.k_factor * (outcome - expected_score)
+
+    def _calculate_expected_score(self, rating1, rating2):
+        return 1 / (1 + math.pow(10, (rating1.mu - rating2.mu) / 400))
+
+    def rate_1vs1(self, rating1, rating2, drawn=False):
+        return (self.rate(rating1, [(DRAW if drawn else WIN, rating2)]),
+                self.rate(rating2, [(DRAW if drawn else LOSS, rating1)]))
+
+
+class Glicko2(object):
+    def __init__(self, mu=MU, phi=PHI, sigma=SIGMA, tau=TAU, epsilon=EPSILON):
+        self.mu = mu
+        self.phi = phi
+        self.sigma = sigma
+        self.tau = tau
+        self.epsilon = epsilon
+        self.type = 'Glicko2'
+
+    def scale_down(self, rating, ratio=173.7178):
         mu = (rating.mu - self.mu) / ratio
         phi = rating.phi / ratio
         return self.create_rating(mu, phi, rating.sigma)
 
-    def scale_up(self, rating: Rating, ratio: float = 173.7178) -> Rating:
+    def scale_up(self, rating, ratio=173.7178):
         mu = rating.mu * ratio + self.mu
         phi = rating.phi * ratio
         return self.create_rating(mu, phi, rating.sigma)
 
-    def reduce_impact(self, rating: Rating) -> float:
+    def reduce_impact(self, rating):
+        """The original form is `g(RD)`. This function reduces the impact of
+        games as a function of an opponent's RD.
+        """
         return 1. / math.sqrt(1 + (3 * rating.phi ** 2) / (math.pi ** 2))
 
-    def expect_score(self, rating: Rating, other_rating: Rating, impact: float) -> float:
+    def expect_score(self, rating, other_rating, impact):
         return 1. / (1 + math.exp(-impact * (rating.mu - other_rating.mu)))
 
-    def determine_sigma(self, rating: Rating, difference: float, variance: float) -> float:
+    def determine_sigma(self, rating, difference, variance):
         """Determines new sigma."""
         phi = rating.phi
         difference_squared = difference ** 2
@@ -156,7 +158,7 @@ class Glicko2:
         # 5. Once |B-A| <= e, set s' <- e^(A/2)
         return math.exp(1) ** (a / 2)
 
-    def rate(self, rating: Rating, series: List[Tuple[float, Rating]]) -> Rating:
+    def rate(self, rating, series):
         # Step 2. For each player, convert the rating and RD's onto the
         #         Glicko-2 scale.
         rating = self.scale_down(rating)
@@ -191,11 +193,11 @@ class Glicko2:
         # Step 8. Convert ratings and RD's back to original scale.
         return self.scale_up(self.create_rating(mu, phi, sigma))
 
-    def rate_1vs1(self, winner: Rating, loser: Rating, drawn: bool = False) -> Tuple[Rating, Rating]:
-        return (self.rate(winner, [(DRAW if drawn else WIN, loser)]),
-                self.rate(loser, [(DRAW if drawn else LOSS, winner)]))
+    def rate_1vs1(self, rating1, rating2, drawn=False):
+        return (self.rate(rating1, [(DRAW if drawn else WIN, rating2)]),
+                self.rate(rating2, [(DRAW if drawn else LOSS, rating1)]))
 
-    def quality_1vs1(self, rating1: Rating, rating2: Rating) -> float:
+    def quality_1vs1(self, rating1, rating2):
         expected_score1 = self.expect_score(rating1, rating2, self.reduce_impact(rating1))
         expected_score2 = self.expect_score(rating2, rating1, self.reduce_impact(rating2))
         expected_score = (expected_score1 + expected_score2) / 2
@@ -258,63 +260,103 @@ class FootballData(object):
         return df
 
 
-data = FootballData()
+# data = FootballData()
 
-elo_ratings = {}  # dict to hold EloRating objects for each team
-glicko_ratings = {}  # dict to hold GlickoRating objects for each team
-glicko2_ratings = {}  # dict to hold Glicko2Rating objects for each team
+teams_dict = {}  # dict to hold ratings objects for each team
+
 
 # For storing game results and ratings
 game_results = []
 glicko2 = Glicko2()
+elo = EloRating()
 
-for index, row in tqdm(data.games.iterrows(), total=data.games.shape[0]):
-    home_team = row['home_team']
-    away_team = row['away_team']
-    winner = row['winner']
-    loser = row['loser']
+ratings: list = [glicko2, elo]
 
-    if winner not in elo_ratings:
 
-        elo_ratings[winner] = EloRating()
-        glicko2_ratings[winner] = glicko2.create_rating()
+# Iterate over each game
+for index, row in data.games.iterrows():
+    # Extract data from the row
+    teams = {
+        'winner': row['winner'],
+        'loser': row['loser']
+    }
+    drawn = row['pts_loser'] == row['pts_winner']
 
-    if loser not in elo_ratings:
-        elo_ratings[loser] = EloRating()
-        glicko2_ratings[loser] = glicko2.create_rating()
+    score = {
+        'winner': WIN if not drawn else DRAW,
+        'loser': LOSS if not drawn else DRAW
+    }
 
-    if winner == home_team:
-        outcome_home = WIN
-        outcome_away = LOSS
-        drawn = False
-    elif winner == away_team:
-        outcome_home = LOSS
-        outcome_away = WIN
-        drawn = False
-    else:  # draw
-        outcome_home = 0.5
-        drawn = True
+    # Update ELO and Glicko-2 ratings
+    for team in teams.values():
+        # Initialize ratings if not present
+        if team not in ratings:
+            ratings[team] = team
+            for rating in ratings:
+                ratings[team][rating.type] = rating.create_rating()
 
-    elo_ratings[home_team].update_rating(elo_ratings[away_team].rating, outcome_home)
-    elo_ratings[away_team].update_rating(elo_ratings[home_team].rating, outcome_away)
+    for teams in teams_dict:
+        
 
-    glicko_ratings[winner], glicko_ratings[loser] = glicko2.rate_1vs1(glicko2_ratings[winner], glicko2_ratings[loser], drawn=drawn)
-    glicko_ratings[home_team] == glicko_ratings[winner] if home_team == winner else glicko_ratings[loser]
-    glicko_ratings[away_team] == glicko_ratings[winner] if away_team == winner else glicko_ratings[loser]
-    # glicko2_ratings[home_team] = glicko2_ratings[home_team].rate_1vs1(glicko2_ratings[away_team], outcome_home == 0.5)[0]
-    # glicko2_ratings[away_team] = glicko2_ratings[away_team].rate_1vs1(glicko2_ratings[home_team], outcome_home == 0.5)[1]
 
-    game_results.append({
-        'home_team': home_team,
-        'away_team': away_team,
-        'outcome_home': outcome_home,
-        'outcome_away': outcome_away,
-        'home_elo': elo_ratings[home_team].rating,
-        'away_elo': elo_ratings[away_team].rating,
-        'home_glicko': glicko_ratings[home_team].mu,
-        'away_glicko': glicko_ratings[away_team].mu,
-        # 'home_glicko2': glicko2_ratings[home_team].mu,
-        # 'away_glicko2': glicko2_ratings[away_team].mu
-    })
+
+
+    # Update Glicko-2 rating
+    g2['winner'], g2['loser'] = glicko2.rate_1vs1(teams['winner'], teams['loser'], drawn=(winner == 'draw'))
+
+    # Create and append dictionaries for each team
+    for team, outcome in [('winner', WIN), ('loser', LOSS)]:
+        game_results.append({
+            'date': row['date'],
+            'year': row['year'],
+            'week': row['week'],
+            'team': row[team],
+            'score': outcome,
+            'opponent': row['loser' if team == 'winner' else 'winner'],
+            'elo': elo_ratings[team].rating,
+            'glicko2': g2[team].mu,
+        })
+
 
 results_df = pd.DataFrame(game_results)
+
+results_df[results_df['team'] == "Cleveland Browns"].glicko2.plot()
+
+results_df.to_csv("results_rated.csv", index=False)
+
+
+"""
+Each row is currently single game with a column for each team, each of their stats etc. I'd like to restructure this data frame to be more tall than it is long. I'd like game to be split among two rows, one for each team. This new row will include that teams stats.  
+
+"""
+
+
+df = data.games
+
+df = df.rename(columns={
+    'winner': 'team_winner',
+    'loser': 'team_loser',
+    'pts_winner': 'pts_team_winner',
+    'pts_loser': 'pts_team_loser',
+    'yards_winner': 'yards_team_winner',
+    'yards_loser': 'yards_team_loser',
+    'turnovers_winner': 'turnovers_team_winner',
+    'turnovers_loser': 'turnovers_team_loser',
+})
+
+# Split DataFrame into two: one for home teams and one for away teams
+home_df = df[['week', 'day', 'date', 'time', 'team_winner', 'home_team', 'pts_team_winner', 'yards_team_winner', 'turnovers_team_winner', 'year']]
+away_df = df[['week', 'day', 'date', 'time', 'team_loser', 'away_team', 'pts_team_loser', 'yards_team_loser', 'turnovers_team_loser', 'year']]
+
+# Rename columns so they match
+home_df = home_df.rename(columns={'team_winner': 'team', 'home_team': 'opponent', 'pts_team_winner': 'pts', 'yards_team_winner': 'yards', 'turnovers_team_winner': 'turnovers'})
+away_df = away_df.rename(columns={'team_loser': 'team', 'away_team': 'opponent', 'pts_team_loser': 'pts', 'yards_team_loser': 'yards', 'turnovers_team_loser': 'turnovers'})
+
+# Combine home_df and away_df
+final_df = pd.concat([home_df, away_df])
+
+# Sort by date to get the games in order
+final_df = final_df.sort_values('date')
+
+# Reset index
+final_df.reset_index(drop=True, inplace=True)
