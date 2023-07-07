@@ -206,25 +206,40 @@ class Glicko2(object):
 
 class FootballData(object):
 
-    def __init__(self, from_year: int = 2000):
+    def __init__(self, from_year: int = 2022):
         self.from_year = from_year
-        self.games = self.process_data()
 
-    def fetch_data(self) -> pd.DataFrame:
+    @functools.lru_cache(maxsize=4)
+    def fetch_data(self, from_year:int=None) -> pd.DataFrame:
         url: str = "https://www.pro-football-reference.com/years/{year}/games.htm"
+
+        from_year = self.from_year if from_year is None else from_year
 
         results: list = []
         years_to_pull: int = datetime.datetime.now().year - self.from_year
+
         for i in range(years_to_pull):
-            df: pd.DataFrame = pd.read_html(
-                url.format(year=self.from_year + i))[0]
+
+            df: pd.DataFrame = pd.read_html(url.format(year=self.from_year + i))[0]
             results.append(df)
 
-        return pd.concat(results)
+        number_of_seasons_returned = len(results)
 
-    @functools.lru_cache(maxsize=1)
-    def process_data(self) -> pd.DataFrame:
-        df = self.fetch_data()
+        if number_of_seasons_returned == 1:
+            results_to_process = results[0]
+        elif number_of_seasons_returned > 1:
+            results_to_process = pd.concat(results)
+        else:
+            raise Exception("No Season data returned")
+        
+        return_val = self.process_data(results_to_process)
+
+        return return_val
+
+
+
+    def process_data(self, df) -> pd.DataFrame:
+
         df = df[df["Day"] != "Day"]
         df = df[df["Date"] != "Playoffs"]
 
@@ -249,18 +264,83 @@ class FootballData(object):
 
         df = df.assign(
             at_value=lambda x: x.at_value.replace(np.nan, ""),
-            home_team=lambda x: np.where(
-                x.at_value.str.contains("@"), x.loser, x.winner),
-            away_team=lambda x: np.where(
-                x.at_value.str.contains("@"), x.winner, x.loser),
+            home_team=lambda x: np.where(x.at_value.str.contains("@"), x.loser, x.winner),
+            away_team=lambda x: np.where(x.at_value.str.contains("@"), x.winner, x.loser),
             date=lambda x: pd.to_datetime(x.date, format="%Y-%m-%d"),
             year=lambda x: x.date.dt.year,
+            pts_winner=lambda x: x.pts_winner.astype(int),
+            pts_loser=lambda x: x.pts_loser.astype(int),
+            yards_winner=lambda x: x.yards_winner.astype(int),
+            turnovers_winner=lambda x: x.turnovers_winner.astype(int),
+            yards_loser=lambda x: x.yards_loser.astype(int),
+            turnovers_loser=lambda x: x.turnovers_loser.astype(int)
         )
 
-        return df
+        df = df[[x for x in df.columns if x not in ['home_team','away_team']]]
+
+        df = df.rename(columns={
+            'winner': 'team_winner',
+            'loser': 'team_loser',
+            'pts_winner': 'pts_team_winner',
+            'pts_loser': 'pts_team_loser',
+            'yards_winner': 'yards_team_winner',
+            'yards_loser': 'yards_team_loser',
+            'turnovers_winner': 'turnovers_team_winner',
+            'turnovers_loser': 'turnovers_team_loser',
+        })
+
+        # Split DataFrame into two: one for home teams and one for away teams
+        winner_df = df[['week', 'day', 'date', 'time', 'team_winner',  'team_loser', 'pts_team_winner', 'pts_team_loser', 'yards_team_winner', 'turnovers_team_winner', 'year']]
+        loser_df = df[['week', 'day', 'date', 'time', 'team_loser', 'team_winner', 'pts_team_loser', 'pts_team_winner','yards_team_loser', 'turnovers_team_loser', 'year']]
+
+        # Rename columns so they match
+        winner_df = (winner_df
+            .assign(
+                draw = lambda df: df.pts_team_winner == df.pts_team_loser,
+                outcome = lambda df: df.draw.apply(lambda x: 'draw' if x else 'win')
+            )
+            .rename(
+                columns={
+                    'team_winner': 'team',
+                    'team_loser': 'opponent',
+                    'pts_team_winner': 'pts',
+                    'yards_team_winner': 'yards',
+                    'turnovers_team_winner': 'turnovers'
+                }
+            )
+        )
+        loser_df = (loser_df
+            .assign(
+                draw = lambda df: df.pts_team_winner == df.pts_team_loser,
+                outcome = lambda df: df.draw.apply(lambda x: 'draw' if x else 'loss')
+            )
+            .rename(
+            columns={
+                'team_loser': 'team',
+                'team_winner': 'opponent',
+                'pts_team_loser': 'pts',
+                'yards_team_loser': 'yards',
+                'turnovers_team_loser': 'turnovers'
+            })
+        )
+        # Combine winner_df and loser_df
+        final_df = pd.concat([winner_df, loser_df]).drop(['pts_team_loser','pts_team_winner','draw'], axis='columns')
+
+        # Sort by date to get the games in order
+        final_df = final_df.sort_values('date')
+
+        # Reset index
+        final_df = final_df.reset_index(drop=True)
+
+        return final_df
 
 
-# data = FootballData()
+
+data = FootballData(2000)
+
+games = data.fetch_data()
+
+
 
 teams_dict = {}  # dict to hold ratings objects for each team
 
@@ -274,7 +354,7 @@ ratings: list = [glicko2, elo]
 
 
 # Iterate over each game
-for index, row in data.games.iterrows():
+for index, row in games.iterrows():
     # Extract data from the row
     teams = {
         'winner': row['winner'],
@@ -288,20 +368,18 @@ for index, row in data.games.iterrows():
     }
 
     # Update ELO and Glicko-2 ratings
-    for team in teams.values():
+    for team_name in teams.values():
         # Initialize ratings if not present
-        if team not in ratings:
-            ratings[team] = team
+        if team_name not in ratings:
+            ratings[team_name] = team_name
             for rating in ratings:
-                ratings[team][rating.type] = rating.create_rating()
+                ratings[team_name][rating.type] = rating.create_rating()
 
-    for teams in teams_dict:
-        
+    
+    for rating_object in ratings:
+        ratings[team_name][rating_object.type] 
 
-
-
-
-    # Update Glicko-2 rating
+     = glicko2.rate_1vs1(teams['winner'], teams['loser'], drawn=(winner == 'draw'))
     g2['winner'], g2['loser'] = glicko2.rate_1vs1(teams['winner'], teams['loser'], drawn=(winner == 'draw'))
 
     # Create and append dictionaries for each team
@@ -324,39 +402,3 @@ results_df[results_df['team'] == "Cleveland Browns"].glicko2.plot()
 
 results_df.to_csv("results_rated.csv", index=False)
 
-
-"""
-Each row is currently single game with a column for each team, each of their stats etc. I'd like to restructure this data frame to be more tall than it is long. I'd like game to be split among two rows, one for each team. This new row will include that teams stats.  
-
-"""
-
-
-df = data.games
-
-df = df.rename(columns={
-    'winner': 'team_winner',
-    'loser': 'team_loser',
-    'pts_winner': 'pts_team_winner',
-    'pts_loser': 'pts_team_loser',
-    'yards_winner': 'yards_team_winner',
-    'yards_loser': 'yards_team_loser',
-    'turnovers_winner': 'turnovers_team_winner',
-    'turnovers_loser': 'turnovers_team_loser',
-})
-
-# Split DataFrame into two: one for home teams and one for away teams
-home_df = df[['week', 'day', 'date', 'time', 'team_winner', 'home_team', 'pts_team_winner', 'yards_team_winner', 'turnovers_team_winner', 'year']]
-away_df = df[['week', 'day', 'date', 'time', 'team_loser', 'away_team', 'pts_team_loser', 'yards_team_loser', 'turnovers_team_loser', 'year']]
-
-# Rename columns so they match
-home_df = home_df.rename(columns={'team_winner': 'team', 'home_team': 'opponent', 'pts_team_winner': 'pts', 'yards_team_winner': 'yards', 'turnovers_team_winner': 'turnovers'})
-away_df = away_df.rename(columns={'team_loser': 'team', 'away_team': 'opponent', 'pts_team_loser': 'pts', 'yards_team_loser': 'yards', 'turnovers_team_loser': 'turnovers'})
-
-# Combine home_df and away_df
-final_df = pd.concat([home_df, away_df])
-
-# Sort by date to get the games in order
-final_df = final_df.sort_values('date')
-
-# Reset index
-final_df.reset_index(drop=True, inplace=True)
