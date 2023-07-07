@@ -11,7 +11,7 @@ from typing import Optional, List, Tuple
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# todo: restructure end-result to not be home vs away
+
 #: The actual score for win
 WIN = 1.
 #: The actual score for draw
@@ -53,15 +53,6 @@ class Rating(object):
         args = (c.__module__, c.__name__, self.mu, self.phi, self.sigma)
         return '%s.%s(mu=%.3f, phi=%.3f, sigma=%.3f)' % args
 
-    def create_rating(self, mu=None, phi=None, sigma=None):
-        if mu is None:
-            mu = self.mu
-        if phi is None:
-            phi = self.phi
-        if sigma is None:
-            sigma = self.sigma
-        return self(mu, phi, sigma)
-    
     def rate(self):
         raise NotImplemented
 
@@ -70,20 +61,24 @@ class Rating(object):
 
 
 class EloRating(object):
-    def __init__(self, k_factor=K_FACTOR):
+    def __init__(self, mu=MU, k_factor=K_FACTOR):
         self.k_factor = k_factor
         self.type = 'Elo'
+        self.mu = mu
 
-    def rate(self, rating1, rating2):
+    def create_rating(self, mu=MU):
+        return Rating(MU)
+
+    def rate(self, rating1, rating2, outcome):
         expected_score = self._calculate_expected_score(rating1, rating2)
-        self.rating += self.k_factor * (outcome - expected_score)
+        self.mu += self.k_factor * (outcome - expected_score)
 
     def _calculate_expected_score(self, rating1, rating2):
         return 1 / (1 + math.pow(10, (rating1.mu - rating2.mu) / 400))
 
-    def rate_1vs1(self, rating1, rating2, drawn=False):
-        return (self.rate(rating1, [(DRAW if drawn else WIN, rating2)]),
-                self.rate(rating2, [(DRAW if drawn else LOSS, rating1)]))
+    def rate_1vs1(self, rating1, rating2, outcome):
+        return (self.rate(rating1, rating2, outcome),
+                self.rate(rating2, rating1, outcome))
 
 
 class Glicko2(object):
@@ -94,6 +89,16 @@ class Glicko2(object):
         self.tau = tau
         self.epsilon = epsilon
         self.type = 'Glicko2'
+
+    def create_rating(self, mu=None, phi=None, sigma=None):
+        if mu is None:
+            mu = self.mu
+        if phi is None:
+            phi = self.phi
+        if sigma is None:
+            sigma = self.sigma
+        return Rating(mu, phi, sigma)
+
 
     def scale_down(self, rating, ratio=173.7178):
         mu = (rating.mu - self.mu) / ratio
@@ -342,63 +347,44 @@ games = data.fetch_data()
 
 
 
-teams_dict = {}  # dict to hold ratings objects for each team
-
-
-# For storing game results and ratings
-game_results = []
 glicko2 = Glicko2()
 elo = EloRating()
 
-ratings: list = [glicko2, elo]
+# Create dictionaries to store the ratings for each team
+glicko2_ratings = {}
+elo_ratings = {}
+
+df = games.copy()
+
+# Loop through each row in the DataFrame
+for index, row in df.iterrows():
+    team = row['team']
+    opponent = row['opponent']
+    outcome = row['outcome']
+
+    # If the team or the opponent is not already in the dictionary, create a new rating
+    for team_name, rating_dict in [(team, glicko2_ratings), (opponent, glicko2_ratings), (team, elo_ratings), (opponent, elo_ratings)]:
+        if team_name not in rating_dict:
+            rating_dict[team_name] = glicko2.create_rating() if rating_dict is glicko2_ratings else elo.create_rating()
+
+    drawn = False
+    # Update the ratings if the team won
+    if outcome == 'win':
+        glicko2_ratings[team], glicko2_ratings[opponent] = glicko2.rate_1vs1(glicko2_ratings[team], glicko2_ratings[opponent], drawn=drawn)
+        # elo_ratings[team], elo_ratings[opponent] = elo.rate_1vs1(elo_ratings[team], elo_ratings[opponent], outcome=WIN)
+    elif outcome == 'loss':
+        glicko2_ratings[opponent], glicko2_ratings[team] = glicko2.rate_1vs1(glicko2_ratings[opponent], glicko2_ratings[team], drawn=drawn)
+        # elo_ratings[team], elo_ratings[opponent] = elo.rate_1vs1(elo_ratings[opponent], elo_ratings[team], outcome=LOSS)
+    # Update the ratings if the game is drawn
+    elif outcome == 'draw': # assuming that 'draw' is the word used in your dataframe for draws
+        drawn = True
+        glicko2_ratings[team], glicko2_ratings[opponent] = glicko2.rate_1vs1(glicko2_ratings[team], glicko2_ratings[opponent], drawn=drawn)
+        # elo_ratings[team], elo_ratings[opponent] = elo.rate_1vs1(elo_ratings[team], elo_ratings[opponent], outcome=DRAW)
+
+# Add the ratings as new columns in the DataFrame
+df['glicko2_rating'] = df['team'].map(lambda team: glicko2_ratings[team].mu)
+# df['elo_rating'] = df['team'].map(elo_ratings)
 
 
-# Iterate over each game
-for index, row in games.iterrows():
-    # Extract data from the row
-    teams = {
-        'winner': row['winner'],
-        'loser': row['loser']
-    }
-    drawn = row['pts_loser'] == row['pts_winner']
-
-    score = {
-        'winner': WIN if not drawn else DRAW,
-        'loser': LOSS if not drawn else DRAW
-    }
-
-    # Update ELO and Glicko-2 ratings
-    for team_name in teams.values():
-        # Initialize ratings if not present
-        if team_name not in ratings:
-            ratings[team_name] = team_name
-            for rating in ratings:
-                ratings[team_name][rating.type] = rating.create_rating()
-
-    
-    for rating_object in ratings:
-        ratings[team_name][rating_object.type] 
-
-     = glicko2.rate_1vs1(teams['winner'], teams['loser'], drawn=(winner == 'draw'))
-    g2['winner'], g2['loser'] = glicko2.rate_1vs1(teams['winner'], teams['loser'], drawn=(winner == 'draw'))
-
-    # Create and append dictionaries for each team
-    for team, outcome in [('winner', WIN), ('loser', LOSS)]:
-        game_results.append({
-            'date': row['date'],
-            'year': row['year'],
-            'week': row['week'],
-            'team': row[team],
-            'score': outcome,
-            'opponent': row['loser' if team == 'winner' else 'winner'],
-            'elo': elo_ratings[team].rating,
-            'glicko2': g2[team].mu,
-        })
-
-
-results_df = pd.DataFrame(game_results)
-
-results_df[results_df['team'] == "Cleveland Browns"].glicko2.plot()
-
-results_df.to_csv("results_rated.csv", index=False)
+df
 
