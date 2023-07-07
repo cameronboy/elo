@@ -71,14 +71,18 @@ class EloRating(object):
 
     def rate(self, rating1, rating2, outcome):
         expected_score = self._calculate_expected_score(rating1, rating2)
-        self.mu += self.k_factor * (outcome - expected_score)
+        delta = self.k_factor * (outcome - expected_score)
+        return Rating(mu=rating1.mu + delta)
 
     def _calculate_expected_score(self, rating1, rating2):
         return 1 / (1 + math.pow(10, (rating1.mu - rating2.mu) / 400))
 
-    def rate_1vs1(self, rating1, rating2, outcome):
-        return (self.rate(rating1, rating2, outcome),
-                self.rate(rating2, rating1, outcome))
+    def rate_1vs1(self, rating1, rating2, drawn=False):
+        outcome = DRAW if drawn else WIN
+        new_rating1 = self.rate(rating1, rating2, outcome)
+        new_rating2 = self.rate(rating2, rating1, 1 - outcome)  # Opposite outcome
+        return new_rating1, new_rating2
+
 
 
 class Glicko2(object):
@@ -98,7 +102,6 @@ class Glicko2(object):
         if sigma is None:
             sigma = self.sigma
         return Rating(mu, phi, sigma)
-
 
     def scale_down(self, rating, ratio=173.7178):
         mu = (rating.mu - self.mu) / ratio
@@ -201,6 +204,7 @@ class Glicko2(object):
     def rate_1vs1(self, rating1, rating2, drawn=False):
         return (self.rate(rating1, [(DRAW if drawn else WIN, rating2)]),
                 self.rate(rating2, [(DRAW if drawn else LOSS, rating1)]))
+
 
     def quality_1vs1(self, rating1, rating2):
         expected_score1 = self.expect_score(rating1, rating2, self.reduce_impact(rating1))
@@ -371,19 +375,19 @@ for index, row in df.iterrows():
     # Update the ratings if the team won
     if outcome == 'win':
         glicko2_ratings[team], glicko2_ratings[opponent] = glicko2.rate_1vs1(glicko2_ratings[team], glicko2_ratings[opponent], drawn=drawn)
-        # elo_ratings[team], elo_ratings[opponent] = elo.rate_1vs1(elo_ratings[team], elo_ratings[opponent], outcome=WIN)
+        elo_ratings[team], elo_ratings[opponent] = elo.rate_1vs1(elo_ratings[team], elo_ratings[opponent], drawn=drawn)
     elif outcome == 'loss':
         glicko2_ratings[opponent], glicko2_ratings[team] = glicko2.rate_1vs1(glicko2_ratings[opponent], glicko2_ratings[team], drawn=drawn)
-        # elo_ratings[team], elo_ratings[opponent] = elo.rate_1vs1(elo_ratings[opponent], elo_ratings[team], outcome=LOSS)
+        elo_ratings[team], elo_ratings[opponent] = elo.rate_1vs1(elo_ratings[opponent], elo_ratings[team], drawn=drawn)
     # Update the ratings if the game is drawn
     elif outcome == 'draw': # assuming that 'draw' is the word used in your dataframe for draws
         drawn = True
         glicko2_ratings[team], glicko2_ratings[opponent] = glicko2.rate_1vs1(glicko2_ratings[team], glicko2_ratings[opponent], drawn=drawn)
-        # elo_ratings[team], elo_ratings[opponent] = elo.rate_1vs1(elo_ratings[team], elo_ratings[opponent], outcome=DRAW)
+        elo_ratings[team], elo_ratings[opponent] = elo.rate_1vs1(elo_ratings[team], elo_ratings[opponent], drawn=drawn)
 
 # Add the ratings as new columns in the DataFrame
 df['glicko2_rating'] = df['team'].map(lambda team: glicko2_ratings[team].mu)
-# df['elo_rating'] = df['team'].map(elo_ratings)
+df['elo_rating'] = df['team'].map(lambda team: elo_ratings[team].mu)
 
 
 df
