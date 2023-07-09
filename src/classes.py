@@ -5,6 +5,7 @@ import math
 from tqdm import tqdm
 import logging
 import functools
+import itertools
 import time
 from typing import Optional, List, Tuple
 
@@ -45,14 +46,15 @@ def utctime():
 
 
 class Rating(object):
-    def __init__(self, mu=MU, phi=PHI, sigma=SIGMA):
+    def __init__(self, mu=MU, phi=PHI, sigma=SIGMA, type=""):
         self.mu = mu
         self.phi = phi
         self.sigma = sigma
+        self.type = type
 
     def __repr__(self):
         c = type(self)
-        args = (c.__module__, c.__name__, self.mu, self.phi, self.sigma)
+        args = (self.type, c.__name__, self.mu, self.phi, self.sigma)
         return '%s.%s(mu=%.3f, phi=%.3f, sigma=%.3f)' % args
 
     def rate(self):
@@ -71,7 +73,7 @@ class EloRating(object):
     def create_rating(self, mu=None):
         if mu is None:
             mu = self.mu
-        return Rating(mu)
+        return Rating(mu, type=self.type)
 
     def rate(self, rating1, rating2, outcome):
         expected_score = self._calculate_expected_score(rating1, rating2)
@@ -106,7 +108,7 @@ class Glicko2(object):
             phi = self.phi
         if sigma is None:
             sigma = self.sigma
-        return Rating(mu, phi, sigma)
+        return Rating(mu, phi, sigma, type=self.type)
 
     def scale_down(self, rating, ratio=173.7178):
         mu = (rating.mu - self.mu) / ratio
@@ -210,14 +212,6 @@ class Glicko2(object):
         return (self.rate(rating1, [(DRAW if drawn else WIN, rating2)]),
                 self.rate(rating2, [(DRAW if drawn else LOSS, rating1)]))
 
-
-    def quality_1vs1(self, rating1, rating2):
-        expected_score1 = self.expect_score(rating1, rating2, self.reduce_impact(rating1))
-        expected_score2 = self.expect_score(rating2, rating1, self.reduce_impact(rating2))
-        expected_score = (expected_score1 + expected_score2) / 2
-        return 2 * (0.5 - abs(0.5 - expected_score))
-
-
 class FootballData(object):
 
     def __init__(self, from_year: int = 2022):
@@ -274,7 +268,7 @@ class FootballData(object):
             }
         )
 
-        df = df.assign(
+        return df.assign(
             at_value=lambda x: x.at_value.replace(np.nan, ""),
             home_team=lambda x: np.where(x.at_value.str.contains("@"), x.loser, x.winner),
             away_team=lambda x: np.where(x.at_value.str.contains("@"), x.winner, x.loser),
@@ -288,63 +282,7 @@ class FootballData(object):
             turnovers_loser=lambda x: x.turnovers_loser.astype(int)
         )
 
-        df = df[[x for x in df.columns if x not in ['home_team','away_team']]]
-
-        df = df.rename(columns={
-            'winner': 'team_winner',
-            'loser': 'team_loser',
-            'pts_winner': 'pts_team_winner',
-            'pts_loser': 'pts_team_loser',
-            'yards_winner': 'yards_team_winner',
-            'yards_loser': 'yards_team_loser',
-            'turnovers_winner': 'turnovers_team_winner',
-            'turnovers_loser': 'turnovers_team_loser',
-        })
-
-        # Split DataFrame into two: one for home teams and one for away teams
-        winner_df = df[['week', 'day', 'date', 'time', 'team_winner',  'team_loser', 'pts_team_winner', 'pts_team_loser', 'yards_team_winner', 'turnovers_team_winner', 'year']]
-        loser_df = df[['week', 'day', 'date', 'time', 'team_loser', 'team_winner', 'pts_team_loser', 'pts_team_winner','yards_team_loser', 'turnovers_team_loser', 'year']]
-
-        # Rename columns so they match
-        winner_df = (winner_df
-            .assign(
-                draw = lambda df: df.pts_team_winner == df.pts_team_loser,
-                outcome = lambda df: df.draw.apply(lambda x: 'draw' if x else 'win')
-            )
-            .rename(
-                columns={
-                    'team_winner': 'team',
-                    'team_loser': 'opponent',
-                    'pts_team_winner': 'pts',
-                    'yards_team_winner': 'yards',
-                    'turnovers_team_winner': 'turnovers'
-                }
-            )
-        )
-        loser_df = (loser_df
-            .assign(
-                draw = lambda df: df.pts_team_winner == df.pts_team_loser,
-                outcome = lambda df: df.draw.apply(lambda x: 'draw' if x else 'loss')
-            )
-            .rename(
-            columns={
-                'team_loser': 'team',
-                'team_winner': 'opponent',
-                'pts_team_loser': 'pts',
-                'yards_team_loser': 'yards',
-                'turnovers_team_loser': 'turnovers'
-            })
-        )
-        # Combine winner_df and loser_df
-        final_df = pd.concat([winner_df, loser_df]).drop(['pts_team_loser','pts_team_winner','draw'], axis='columns')
-
-        # Sort by date to get the games in order
-        final_df = final_df.sort_values('date')
-
-        # Reset index
-        final_df = final_df.reset_index(drop=True)
-
-        return final_df
+        
 
     def plot_ratings(self, df, team_name):
         # Filter the dataframe for the specific team
@@ -380,48 +318,81 @@ class FootballData(object):
 
 data = FootballData(2000)
 
-# games = data.fetch_data()
+games = data.fetch_data()
 
 glicko2 = Glicko2()
 elo = EloRating()
 
 # Create dictionaries to store the ratings for each team
+players = {}
+weeks = {}
 glicko2_ratings = {}
 elo_ratings = {}
 
+ratings_dicts = [elo_ratings, glicko2_ratings]
+ratings_objects = [elo, glicko2]
+
 df = games.copy()
 
+
 # Loop through each row in the DataFrame
+
+"""
+This whole thing is stupidly over-complicated.
+Just create a new dataframe with this information..."""
 for row_index, row in df.iterrows():
-    team = row['team']
-    opponent = row['opponent']
-    outcome = row['outcome']
+    winner = row['winner']
+    loser = row['loser']
+    drawn = row['pts_winner'] == row['pts_loser']
+    year = row['year']
+    week = row['week']
+    year_week = str(row['year']) + '-' + row['week']
 
-    # If the team or the opponent is not already in the dictionary, create a new rating
-    for team_name, rating_dict in [(team, glicko2_ratings), (opponent, glicko2_ratings), (team, elo_ratings), (opponent, elo_ratings)]:
-        if team_name not in rating_dict:
-            rating_dict[team_name] = glicko2.create_rating() if rating_dict is glicko2_ratings else elo.create_rating()
+    teams = [winner, loser]
 
-    drawn = False
-    # Update the ratings if the team won
-    if outcome == 'win':
-        glicko2_ratings[team], glicko2_ratings[opponent] = glicko2.rate_1vs1(glicko2_ratings[team], glicko2_ratings[opponent], drawn=drawn)
-        elo_ratings[team].rate_1vs1(elo_ratings[opponent], drawn=drawn)
+    for rating_dict, rating in zip(ratings_dicts, ratings_objects):
 
-    elif outcome == 'loss':
-        glicko2_ratings[opponent], glicko2_ratings[team] = glicko2.rate_1vs1(glicko2_ratings[opponent], glicko2_ratings[team], drawn=drawn)
-        elo_ratings[opponent], elo_ratings[team] = elo.rate_1vs1(elo_ratings[opponent], elo_ratings[team], drawn=drawn)
+        if year_week not in weeks:
+            weeks[year_week] = {rating.type: []}
 
-    elif outcome == 'draw': # assuming that 'draw' is the word used in your dataframe for draws
-        drawn = True
-        glicko2_ratings[team], glicko2_ratings[opponent] = glicko2.rate_1vs1(glicko2_ratings[team], glicko2_ratings[opponent], drawn=drawn)
-        elo_ratings[team], elo_ratings[opponent] = elo.rate_1vs1(elo_ratings[team], elo_ratings[opponent], drawn=drawn)
+        for team_name in teams:
 
-    df.loc[row_index, 'glicko2_rating'] = glicko2_ratings[team].mu
-    df.loc[row_index, 'elo_rating'] = elo_ratings[team].mu
+            if team_name not in rating_dict:
+                rating_dict[team_name] = glicko2.create_rating() if rating_dict is glicko2_ratings else elo.create_rating()
+
+            if year_week not in players.get(team_name, {}):  # Add the week to the player's record if not already present
+                if team_name not in players:
+                    players[team_name] = {year_week: []}
+                else:
+                    players[team_name][year_week] = []
+
+        # Ensuring that the week's ratings dictionary for the current rating type is initialized as an empty list
+        if rating.type not in weeks[year_week]:
+            weeks[year_week][rating.type] = []
+
+        rating_dict[winner], rating_dict[loser] = rating.rate_1vs1(rating_dict[winner], rating_dict[loser], drawn=drawn)
+
+        for team_name in teams:
+            players[team_name][year_week].append({rating.type: rating_dict[team_name].mu})
+            weeks[year_week][rating.type].append({team_name: rating_dict[team_name].mu})
 
 
-data.plot_ratings(df, 'Minnesota Vikings')
+        
 
 
-glicko2_ratings['Minnesota Vikings']
+
+Current: 
+players: dict = {
+    "Minnesota Vikings" : {
+        202201 : [
+            {"elo": 1500},
+            {"glicko2": 1500}
+        ],
+        202202: [
+            {"elo": 1505},
+            {"glicko": 1506}
+        ],
+    }
+}
+
+Preferred:
