@@ -8,6 +8,8 @@ import functools
 import time
 from typing import Optional, List, Tuple
 
+import matplotlib.pyplot as plt 
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -66,13 +68,16 @@ class EloRating(object):
         self.type = 'Elo'
         self.mu = mu
 
-    def create_rating(self, mu=MU):
-        return Rating(MU)
+    def create_rating(self, mu=None):
+        if mu is None:
+            mu = self.mu
+        return Rating(mu)
 
     def rate(self, rating1, rating2, outcome):
         expected_score = self._calculate_expected_score(rating1, rating2)
         delta = self.k_factor * (outcome - expected_score)
-        return Rating(mu=rating1.mu + delta)
+        new_mu = rating1.mu + delta
+        return self.create_rating(mu=new_mu)
 
     def _calculate_expected_score(self, rating1, rating2):
         return 1 / (1 + math.pow(10, (rating1.mu - rating2.mu) / 400))
@@ -245,8 +250,6 @@ class FootballData(object):
 
         return return_val
 
-
-
     def process_data(self, df) -> pd.DataFrame:
 
         df = df[df["Day"] != "Day"]
@@ -343,13 +346,41 @@ class FootballData(object):
 
         return final_df
 
+    def plot_ratings(self, df, team_name):
+        # Filter the dataframe for the specific team
+        team_df = df[df['team'] == team_name]
+        
+        # Create a figure and axis
+        fig, ax1 = plt.subplots()
+
+        # Plot Glicko2 rating
+        line1 = ax1.plot(team_df.index, team_df['glicko2_rating'], 'b-', label='Glicko2 Rating')
+        ax1.set_xlabel('Time')
+        ax1.set_ylabel('Glicko2 Rating', color='b')
+
+        # Create second axis
+        ax2 = ax1.twinx()
+
+        # Plot Elo rating on second axis
+        line2 = ax2.plot(team_df.index, team_df['elo_rating'], 'r-', label='Elo Rating')
+        ax2.set_ylabel('Elo Rating', color='r')
+
+        # Add title and labels
+        plt.title(f'Rating progression for team {team_name}')
+
+        # Combine legends
+        lines = line1 + line2
+        labels = [l.get_label() for l in lines]
+        ax1.legend(lines, labels, loc=0)
+
+        # Show the plot
+        plt.show()
+
 
 
 data = FootballData(2000)
 
-games = data.fetch_data()
-
-
+# games = data.fetch_data()
 
 glicko2 = Glicko2()
 elo = EloRating()
@@ -361,7 +392,7 @@ elo_ratings = {}
 df = games.copy()
 
 # Loop through each row in the DataFrame
-for index, row in df.iterrows():
+for row_index, row in df.iterrows():
     team = row['team']
     opponent = row['opponent']
     outcome = row['outcome']
@@ -375,20 +406,22 @@ for index, row in df.iterrows():
     # Update the ratings if the team won
     if outcome == 'win':
         glicko2_ratings[team], glicko2_ratings[opponent] = glicko2.rate_1vs1(glicko2_ratings[team], glicko2_ratings[opponent], drawn=drawn)
-        elo_ratings[team], elo_ratings[opponent] = elo.rate_1vs1(elo_ratings[team], elo_ratings[opponent], drawn=drawn)
+        elo_ratings[team].rate_1vs1(elo_ratings[opponent], drawn=drawn)
+
     elif outcome == 'loss':
         glicko2_ratings[opponent], glicko2_ratings[team] = glicko2.rate_1vs1(glicko2_ratings[opponent], glicko2_ratings[team], drawn=drawn)
-        elo_ratings[team], elo_ratings[opponent] = elo.rate_1vs1(elo_ratings[opponent], elo_ratings[team], drawn=drawn)
-    # Update the ratings if the game is drawn
+        elo_ratings[opponent], elo_ratings[team] = elo.rate_1vs1(elo_ratings[opponent], elo_ratings[team], drawn=drawn)
+
     elif outcome == 'draw': # assuming that 'draw' is the word used in your dataframe for draws
         drawn = True
         glicko2_ratings[team], glicko2_ratings[opponent] = glicko2.rate_1vs1(glicko2_ratings[team], glicko2_ratings[opponent], drawn=drawn)
         elo_ratings[team], elo_ratings[opponent] = elo.rate_1vs1(elo_ratings[team], elo_ratings[opponent], drawn=drawn)
 
-# Add the ratings as new columns in the DataFrame
-df['glicko2_rating'] = df['team'].map(lambda team: glicko2_ratings[team].mu)
-df['elo_rating'] = df['team'].map(lambda team: elo_ratings[team].mu)
+    df.loc[row_index, 'glicko2_rating'] = glicko2_ratings[team].mu
+    df.loc[row_index, 'elo_rating'] = elo_ratings[team].mu
 
 
-df
+data.plot_ratings(df, 'Minnesota Vikings')
 
+
+glicko2_ratings['Minnesota Vikings']
