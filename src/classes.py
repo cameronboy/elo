@@ -8,21 +8,22 @@ import functools
 import itertools
 import time
 from typing import Optional, List, Tuple
+import os
 
-import matplotlib.pyplot as plt 
+import matplotlib.pyplot as plt
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
 #: The actual score for win
-WIN = 1.
+WIN = 1.0
 #: The actual score for draw
 DRAW = 0.5
 #: The actual score for loss
-LOSS = 0.
+LOSS = 0.0
 
-K_FACTOR = 32
+K_FACTOR = 12
 
 
 MU = 1500
@@ -55,7 +56,7 @@ class Rating(object):
     def __repr__(self):
         c = type(self)
         args = (self.type, c.__name__, self.mu, self.phi, self.sigma)
-        return '%s.%s(mu=%.3f, phi=%.3f, sigma=%.3f)' % args
+        return "%s.%s(mu=%.3f, phi=%.3f, sigma=%.3f)" % args
 
     def rate(self):
         raise NotImplemented
@@ -67,7 +68,7 @@ class Rating(object):
 class EloRating(object):
     def __init__(self, mu=MU, k_factor=K_FACTOR):
         self.k_factor = k_factor
-        self.type = 'Elo'
+        self.type = "elo"
         self.mu = mu
 
     def create_rating(self, mu=None):
@@ -91,7 +92,6 @@ class EloRating(object):
         return new_rating1, new_rating2
 
 
-
 class Glicko2(object):
     def __init__(self, mu=MU, phi=PHI, sigma=SIGMA, tau=TAU, epsilon=EPSILON):
         self.mu = mu
@@ -99,7 +99,7 @@ class Glicko2(object):
         self.sigma = sigma
         self.tau = tau
         self.epsilon = epsilon
-        self.type = 'Glicko2'
+        self.type = "glicko2"
 
     def create_rating(self, mu=None, phi=None, sigma=None):
         if mu is None:
@@ -124,36 +124,36 @@ class Glicko2(object):
         """The original form is `g(RD)`. This function reduces the impact of
         games as a function of an opponent's RD.
         """
-        return 1. / math.sqrt(1 + (3 * rating.phi ** 2) / (math.pi ** 2))
+        return 1.0 / math.sqrt(1 + (3 * rating.phi**2) / (math.pi**2))
 
     def expect_score(self, rating, other_rating, impact):
-        return 1. / (1 + math.exp(-impact * (rating.mu - other_rating.mu)))
+        return 1.0 / (1 + math.exp(-impact * (rating.mu - other_rating.mu)))
 
     def determine_sigma(self, rating, difference, variance):
         """Determines new sigma."""
         phi = rating.phi
-        difference_squared = difference ** 2
+        difference_squared = difference**2
         # 1. Let a = ln(s^2), and define f(x)
-        alpha = math.log(rating.sigma ** 2)
+        alpha = math.log(rating.sigma**2)
 
         def f(x):
             """This function is twice the conditional log-posterior density of
             phi, and is the optimality criterion.
             """
-            tmp = phi ** 2 + variance + math.exp(x)
-            a = math.exp(x) * (difference_squared - tmp) / (2 * tmp ** 2)
-            b = (x - alpha) / (self.tau ** 2)
+            tmp = phi**2 + variance + math.exp(x)
+            a = math.exp(x) * (difference_squared - tmp) / (2 * tmp**2)
+            b = (x - alpha) / (self.tau**2)
             return a - b
 
         # 2. Set the initial values of the iterative algorithm.
         a = alpha
-        if difference_squared > phi ** 2 + variance:
-            b = math.log(difference_squared - phi ** 2 - variance)
+        if difference_squared > phi**2 + variance:
+            b = math.log(difference_squared - phi**2 - variance)
         else:
             k = 1
-            while f(alpha - k * math.sqrt(self.tau ** 2)) < 0:
+            while f(alpha - k * math.sqrt(self.tau**2)) < 0:
                 k += 1
-            b = alpha - k * math.sqrt(self.tau ** 2)
+            b = alpha - k * math.sqrt(self.tau**2)
         # 3. Let fA = f(A) and f(B) = f(B)
         f_a, f_b = f(a), f(b)
         # 4. While |B-A| > e, carry out the following steps.
@@ -186,39 +186,97 @@ class Glicko2(object):
         difference = 0
         if not series:
             # If the team didn't play in the series, do only Step 6
-            phi_star = math.sqrt(rating.phi ** 2 + rating.sigma ** 2)
+            phi_star = math.sqrt(rating.phi**2 + rating.sigma**2)
             return self.scale_up(self.create_rating(rating.mu, phi_star, rating.sigma))
         for actual_score, other_rating in series:
             other_rating = self.scale_down(other_rating)
             impact = self.reduce_impact(other_rating)
             expected_score = self.expect_score(rating, other_rating, impact)
-            variance_inv += impact ** 2 * expected_score * (1 - expected_score)
+            variance_inv += impact**2 * expected_score * (1 - expected_score)
             difference += impact * (actual_score - expected_score)
         difference /= variance_inv
-        variance = 1. / variance_inv
+        variance = 1.0 / variance_inv
         # Step 5. Determine the new value, Sigma', ot the sigma. This
         #         computation requires iteration.
         sigma = self.determine_sigma(rating, difference, variance)
         # Step 6. Update the rating deviation to the new pre-rating period
         #         value, Phi*.
-        phi_star = math.sqrt(rating.phi ** 2 + sigma ** 2)
+        phi_star = math.sqrt(rating.phi**2 + sigma**2)
         # Step 7. Update the rating and RD to the new values, Mu' and Phi'.
-        phi = 1. / math.sqrt(1 / phi_star ** 2 + 1 / variance)
-        mu = rating.mu + phi ** 2 * (difference / variance)
+        phi = 1.0 / math.sqrt(1 / phi_star**2 + 1 / variance)
+        mu = rating.mu + phi**2 * (difference / variance)
         # Step 8. Convert ratings and RD's back to original scale.
-        return self.scale_up(self.create_rating(mu, phi, sigma))
+        return self.scale_up(self.create_rating(mu=mu, phi=phi, sigma=sigma))
 
     def rate_1vs1(self, rating1, rating2, drawn=False):
-        return (self.rate(rating1, [(DRAW if drawn else WIN, rating2)]),
-                self.rate(rating2, [(DRAW if drawn else LOSS, rating1)]))
+        new_rating1 = self.rate(rating1, [(DRAW if drawn else WIN, rating2)])
+        new_rating2 = self.rate(rating2, [(DRAW if drawn else LOSS, rating1)])
+        return new_rating1, new_rating2
+
 
 class FootballData(object):
-
     def __init__(self, from_year: int = 2022):
         self.from_year = from_year
+        self.cur_dir = os.getcwd()
+        self.backup_file = os.path.join(self.cur_dir, "raw_backup.csv")
 
-    @functools.lru_cache(maxsize=4)
-    def fetch_data(self, from_year:int=None) -> pd.DataFrame:
+    def _tweak_df(self, df: pd.DataFrame) -> pd.DataFrame:
+        # Define the columns that won't be melted
+        id_vars = [
+            "week",
+            "day",
+            "date",
+            "time",
+            "at_value",
+            "boxscore",
+            "season_year",
+            "home_team",
+            "away_team",
+        ]
+
+        # Define the columns that will be melted
+        value_vars = ["winner", "loser"]
+
+        # Melt the DataFrame
+        df_melted = pd.melt(
+            df,
+            id_vars=id_vars,
+            value_vars=value_vars,
+            var_name="is_winner",
+            value_name="team",
+        )
+
+        # Convert the 'is_winner' column to a boolean
+        df_melted["is_winner"] = df_melted["is_winner"] == "winner"
+
+        # Add a column for the opponent team
+        df_melted["opponent"] = np.where(
+            df_melted["team"] == df_melted["home_team"],
+            df_melted["away_team"],
+            df_melted["home_team"],
+        )
+
+        # Add a column for each week/team combination of the team they played
+        df_melted["week_team_opponent"] = (
+            df_melted["season_year"].astype(str)
+            + "-"
+            + df_melted["week"].astype(str)
+            + "-"
+            + df_melted["team"]
+            + "-"
+            + df_melted["opponent"]
+        )
+
+        return df_melted
+
+    def fetch_data(self, from_year: int = None) -> pd.DataFrame:
+        try:
+            df = pd.read_csv(self.backup_file)
+            print("Reading backup file..")
+            return self._tweak_df(df)
+        except:
+            print("Pulling data from web.")
+
         url: str = "https://www.pro-football-reference.com/years/{year}/games.htm"
 
         from_year = self.from_year if from_year is None else from_year
@@ -227,8 +285,9 @@ class FootballData(object):
         years_to_pull: int = datetime.datetime.now().year - self.from_year
 
         for i in range(years_to_pull):
-
-            df: pd.DataFrame = pd.read_html(url.format(year=self.from_year + i))[0]
+            season_year = self.from_year + i
+            df: pd.DataFrame = pd.read_html(url.format(year=season_year))[0]
+            df["season_year"] = season_year
             results.append(df)
 
         number_of_seasons_returned = len(results)
@@ -239,13 +298,13 @@ class FootballData(object):
             results_to_process = pd.concat(results)
         else:
             raise Exception("No Season data returned")
-        
-        return_val = self.process_data(results_to_process)
 
-        return return_val
+        # Process the data
+        df = self.process_data(results_to_process)
+
+        return self._tweak_df(df)
 
     def process_data(self, df) -> pd.DataFrame:
-
         df = df[df["Day"] != "Day"]
         df = df[df["Date"] != "Playoffs"]
 
@@ -268,10 +327,14 @@ class FootballData(object):
             }
         )
 
-        return df.assign(
+        df = df.assign(
             at_value=lambda x: x.at_value.replace(np.nan, ""),
-            home_team=lambda x: np.where(x.at_value.str.contains("@"), x.loser, x.winner),
-            away_team=lambda x: np.where(x.at_value.str.contains("@"), x.winner, x.loser),
+            home_team=lambda x: np.where(
+                x.at_value.str.contains("@"), x.loser, x.winner
+            ),
+            away_team=lambda x: np.where(
+                x.at_value.str.contains("@"), x.winner, x.loser
+            ),
             date=lambda x: pd.to_datetime(x.date, format="%Y-%m-%d"),
             year=lambda x: x.date.dt.year,
             pts_winner=lambda x: x.pts_winner.astype(int),
@@ -279,120 +342,94 @@ class FootballData(object):
             yards_winner=lambda x: x.yards_winner.astype(int),
             turnovers_winner=lambda x: x.turnovers_winner.astype(int),
             yards_loser=lambda x: x.yards_loser.astype(int),
-            turnovers_loser=lambda x: x.turnovers_loser.astype(int)
+            turnovers_loser=lambda x: x.turnovers_loser.astype(int),
         )
 
-        
+        df.to_csv(self.backup_file, index=False)
 
-    def plot_ratings(self, df, team_name):
-        # Filter the dataframe for the specific team
-        team_df = df[df['team'] == team_name]
-        
-        # Create a figure and axis
-        fig, ax1 = plt.subplots()
-
-        # Plot Glicko2 rating
-        line1 = ax1.plot(team_df.index, team_df['glicko2_rating'], 'b-', label='Glicko2 Rating')
-        ax1.set_xlabel('Time')
-        ax1.set_ylabel('Glicko2 Rating', color='b')
-
-        # Create second axis
-        ax2 = ax1.twinx()
-
-        # Plot Elo rating on second axis
-        line2 = ax2.plot(team_df.index, team_df['elo_rating'], 'r-', label='Elo Rating')
-        ax2.set_ylabel('Elo Rating', color='r')
-
-        # Add title and labels
-        plt.title(f'Rating progression for team {team_name}')
-
-        # Combine legends
-        lines = line1 + line2
-        labels = [l.get_label() for l in lines]
-        ax1.legend(lines, labels, loc=0)
-
-        # Show the plot
-        plt.show()
-
+        return df
 
 
 data = FootballData(2000)
 
 games = data.fetch_data()
 
+# Initialize Glicko2 and EloRating objects
 glicko2 = Glicko2()
 elo = EloRating()
 
-# Create dictionaries to store the ratings for each team
-players = {}
-weeks = {}
-glicko2_ratings = {}
-elo_ratings = {}
+# Initialize dictionaries to store ratings
+ratings_dicts = {glicko2.type: {}, elo.type: {}}
 
-ratings_dicts = [elo_ratings, glicko2_ratings]
-ratings_objects = [elo, glicko2]
-
+# Copy the games DataFrame
 df = games.copy()
 
 
-# Loop through each row in the DataFrame
+# Add columns to store Glicko2 and Elo ratings
+df["glicko2_rating"] = np.nan
+df["elo_rating"] = np.nan
 
-"""
-This whole thing is stupidly over-complicated.
-Just create a new dataframe with this information..."""
+
+# The Loop
 for row_index, row in df.iterrows():
-    winner = row['winner']
-    loser = row['loser']
-    drawn = row['pts_winner'] == row['pts_loser']
-    year = row['year']
-    week = row['week']
-    year_week = str(row['year']) + '-' + row['week']
+    team = row["team"]
+    opponent = row["opponent"]
+    is_winner = row["is_winner"]
+    year_week = str(row["season_year"]) + "-" + row["week"]
 
-    teams = [winner, loser]
+    for rating in [glicko2, elo]:
+        rating_dict = ratings_dicts[rating.type]
+        # Update ratings for the team
+        if team not in rating_dict:
+            rating_dict[team] = rating.create_rating()
+        if opponent not in rating_dict:
+            rating_dict[opponent] = rating.create_rating()
 
-    for rating_dict, rating in zip(ratings_dicts, ratings_objects):
+        # Update the rating based on whether the team won or lost
+        if is_winner:
+            new_rating_team, new_rating_opponent = rating.rate_1vs1(
+                rating_dict[team], rating_dict[opponent]
+            )
+        else:
+            new_rating_opponent, new_rating_team = rating.rate_1vs1(
+                rating_dict[opponent], rating_dict[team]
+            )
 
-        if year_week not in weeks:
-            weeks[year_week] = {rating.type: []}
+        rating_dict[team] = new_rating_team
+        rating_dict[opponent] = new_rating_opponent
 
-        for team_name in teams:
-
-            if team_name not in rating_dict:
-                rating_dict[team_name] = glicko2.create_rating() if rating_dict is glicko2_ratings else elo.create_rating()
-
-            if year_week not in players.get(team_name, {}):  # Add the week to the player's record if not already present
-                if team_name not in players:
-                    players[team_name] = {year_week: []}
-                else:
-                    players[team_name][year_week] = []
-
-        # Ensuring that the week's ratings dictionary for the current rating type is initialized as an empty list
-        if rating.type not in weeks[year_week]:
-            weeks[year_week][rating.type] = []
-
-        rating_dict[winner], rating_dict[loser] = rating.rate_1vs1(rating_dict[winner], rating_dict[loser], drawn=drawn)
-
-        for team_name in teams:
-            players[team_name][year_week].append({rating.type: rating_dict[team_name].mu})
-            weeks[year_week][rating.type].append({team_name: rating_dict[team_name].mu})
+        # Add ratings to the DataFrame
+        df.loc[row_index, rating.type + "_rating"] = new_rating_team.mu
 
 
-        
+def plot_ratings(df, team_name):
+    # Filter the dataframe for the specific team
+    team_df = df[df["team"] == team_name]
+    # Filter the dataframe for the specific year
+    team_df = team_df[team_df["season_year"] > 2017]
+
+    # Sort the dataframe by date
+    team_df = team_df.sort_values(by=["season_year", "date"])
+
+    # Create a figure and axis with increased size
+    fig, ax = plt.subplots(figsize=(19, 8))  # Adjust the numbers as needed
+
+    # Plot Glicko2 rating with each year being a different color
+    sns.barplot(
+        x=team_df["week"],
+        y=team_df["glicko2_rating"],
+        hue=team_df["season_year"],
+        palette="tab10",
+        ax=ax,
+    )
+
+    # Set labels
+    ax.set_xlabel("Week")
+    ax.set_ylabel("Glicko2 Rating")
+    plt.title(f"Glicko2 Rating progression for team {team_name}")
+
+    # Show the plot
+    plt.show()
 
 
-
-Current: 
-players: dict = {
-    "Minnesota Vikings" : {
-        202201 : [
-            {"elo": 1500},
-            {"glicko2": 1500}
-        ],
-        202202: [
-            {"elo": 1505},
-            {"glicko": 1506}
-        ],
-    }
-}
-
-Preferred:
+plot_ratings(df, "Minnesota Vikings")
