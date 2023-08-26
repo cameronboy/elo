@@ -368,9 +368,15 @@ def plot_ratings(df, team_name):
     )
 
     # Set labels
-    ax.set_xlabel("Week")
+    ax.set_xlabel("Year/Week")
     ax.set_ylabel("Glicko2 Rating")
     plt.title(f"Glicko2 Rating progression for team {team_name}")
+
+    # Legend
+    legend = ax.legend()
+    legend.set_title("Season")
+
+    plt.xticks([])
 
     # Save the Plot
     plt.savefig(f"../figures/{team_name}.png".replace(" ", "_"))
