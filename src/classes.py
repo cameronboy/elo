@@ -214,7 +214,7 @@ class FootballData(object):
     def __init__(self, from_year: int = 2022):
         self.from_year = from_year
         self.cur_dir = os.getcwd()
-        self.backup_file = os.path.join(self.cur_dir, "raw_backup.csv")
+        self.backup_file = os.path.join(self.cur_dir, "data/raw_backup.csv")
 
     def _tweak_df(self, df: pd.DataFrame) -> pd.DataFrame:
         # Define the columns that won't be melted
@@ -360,7 +360,7 @@ def plot_ratings(df, team_name):
 
     # Plot Glicko2 rating with each year being a different color
     sns.lineplot(
-        x=team_df["week"],
+        x=team_df["date"],
         y=team_df["glicko2_rating"],
         hue=team_df["season_year"],
         palette="tab10",
@@ -371,6 +371,9 @@ def plot_ratings(df, team_name):
     ax.set_xlabel("Week")
     ax.set_ylabel("Glicko2 Rating")
     plt.title(f"Glicko2 Rating progression for team {team_name}")
+
+    # Save the Plot
+    plt.savefig(f"../figures/{team_name}.png".replace(" ", "_"))
 
     # Show the plot
     plt.show()
