@@ -2,13 +2,10 @@ import pandas as pd
 import datetime
 import numpy as np
 import math
-from tqdm import tqdm
 import logging
-import functools
-import itertools
 import time
-from typing import Optional, List, Tuple
 import os
+import seaborn as sns
 
 import matplotlib.pyplot as plt
 
@@ -42,7 +39,6 @@ PHI = 350
 
 
 def utctime():
-    """A function like :func:`time.time` but it uses a time of UTC."""
     return time.mktime(datetime.datetime.utcnow().timetuple())
 
 
@@ -350,58 +346,6 @@ class FootballData(object):
         return df
 
 
-data = FootballData(2000)
-
-games = data.fetch_data()
-
-# Initialize Glicko2 and EloRating objects
-glicko2 = Glicko2()
-elo = EloRating()
-
-# Initialize dictionaries to store ratings
-ratings_dicts = {glicko2.type: {}, elo.type: {}}
-
-# Copy the games DataFrame
-df = games.copy()
-
-
-# Add columns to store Glicko2 and Elo ratings
-df["glicko2_rating"] = np.nan
-df["elo_rating"] = np.nan
-
-
-# The Loop
-for row_index, row in df.iterrows():
-    team = row["team"]
-    opponent = row["opponent"]
-    is_winner = row["is_winner"]
-    year_week = str(row["season_year"]) + "-" + row["week"]
-
-    for rating in [glicko2, elo]:
-        rating_dict = ratings_dicts[rating.type]
-        # Update ratings for the team
-        if team not in rating_dict:
-            rating_dict[team] = rating.create_rating()
-        if opponent not in rating_dict:
-            rating_dict[opponent] = rating.create_rating()
-
-        # Update the rating based on whether the team won or lost
-        if is_winner:
-            new_rating_team, new_rating_opponent = rating.rate_1vs1(
-                rating_dict[team], rating_dict[opponent]
-            )
-        else:
-            new_rating_opponent, new_rating_team = rating.rate_1vs1(
-                rating_dict[opponent], rating_dict[team]
-            )
-
-        rating_dict[team] = new_rating_team
-        rating_dict[opponent] = new_rating_opponent
-
-        # Add ratings to the DataFrame
-        df.loc[row_index, rating.type + "_rating"] = new_rating_team.mu
-
-
 def plot_ratings(df, team_name):
     # Filter the dataframe for the specific team
     team_df = df[df["team"] == team_name]
@@ -412,10 +356,10 @@ def plot_ratings(df, team_name):
     team_df = team_df.sort_values(by=["season_year", "date"])
 
     # Create a figure and axis with increased size
-    fig, ax = plt.subplots(figsize=(19, 8))  # Adjust the numbers as needed
+    fig, ax = plt.subplots(figsize=(12, 5))  # Adjust the numbers as needed
 
     # Plot Glicko2 rating with each year being a different color
-    sns.barplot(
+    sns.lineplot(
         x=team_df["week"],
         y=team_df["glicko2_rating"],
         hue=team_df["season_year"],
@@ -430,6 +374,3 @@ def plot_ratings(df, team_name):
 
     # Show the plot
     plt.show()
-
-
-plot_ratings(df, "Minnesota Vikings")

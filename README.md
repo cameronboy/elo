@@ -1,1 +1,2 @@
-# elo
+## Glicko2 & Elo Ratings
+
